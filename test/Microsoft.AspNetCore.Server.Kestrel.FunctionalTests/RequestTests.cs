@@ -193,7 +193,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
             const int connectionErrorEventId = 14; // from KestrelTrace.cs
 
             var testSink = new TestSink(write => write.EventId.Id == connectionErrorEventId);
-            var requestAbortedAcquired = new CancellationTokenSource();
             var builder = new WebHostBuilder()
                 .UseLoggerFactory(new TestLoggerFactory(testSink, true))
                 .UseKestrel()
@@ -217,7 +216,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                 var filteredWrites = testSink.Writes.Where(write => write.EventId.Id == connectionErrorEventId);
                 for (var i = 0; i < 10; i++)
                 {
-                    System.Console.WriteLine(i);
                     if (filteredWrites.Any())
                     {
                         break;
@@ -229,6 +227,58 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests
                 var connectionErrorMessage = filteredWrites.FirstOrDefault();
                 Assert.NotNull(connectionErrorMessage);
                 Assert.Contains("ECONNRESET", connectionErrorMessage.Exception.Message);
+            }
+        }
+
+        [Fact]
+        public async Task ThrowsOnReadAfterConnectionError_RequestBody()
+        {
+            var requestStarted = new SemaphoreSlim(0);
+            var connectionReset = new SemaphoreSlim(0);
+            var appDone = new SemaphoreSlim(0);
+            var ioExceptionThrown = false;
+
+            var builder = new WebHostBuilder()
+                .UseKestrel()
+                .UseUrls($"http://127.0.0.1:0")
+                .Configure(app => app.Run(async context =>
+                {
+                    requestStarted.Release();
+                    await connectionReset.WaitAsync();
+
+                    try
+                    {
+                        await context.Request.Body.ReadAsync(new byte[1], 0, 1);
+                    }
+                    catch (BadHttpRequestException)
+                    {
+                        // We need this here because BadHttpRequestException derives from IOException,
+                        // and we're looking for an actual IOException.
+                    }
+                    catch (IOException)
+                    {
+                        ioExceptionThrown = true;
+                    }
+
+                    appDone.Release(1);
+                }));
+
+            using (var host = builder.Build())
+            {
+                host.Start();
+
+                using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                {
+                    socket.Connect(new IPEndPoint(IPAddress.Loopback, host.GetPort()));
+                    socket.LingerState = new LingerOption(true, 0);
+                    socket.Send(Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nContent-Length: 1\r\n\r\n"));
+                    await requestStarted.WaitAsync();
+                }
+
+                connectionReset.Release(1);
+
+                await appDone.WaitAsync();
+                Assert.True(ioExceptionThrown);
             }
         }
 

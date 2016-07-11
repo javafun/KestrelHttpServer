@@ -45,6 +45,19 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Internal.Http
 
         public bool IsCompleted => ReferenceEquals(_awaitableState, _awaitableIsCompleted);
 
+        public bool CheckFinOrThrow()
+        {
+            lock (_sync)
+            {
+                if (_awaitableError != null)
+                {
+                    ThrowOnConnectionError();
+                }
+
+                return RemoteIntakeFin;
+            }
+        }
+
         public MemoryPoolBlock IncomingStart()
         {
             const int minimumSize = 2048;
@@ -303,14 +316,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Internal.Http
             {
                 _manualResetEvent.Wait();
             }
-            var error = _awaitableError;
-            if (error != null)
+
+            if (_awaitableError != null)
             {
-                if (error is TaskCanceledException || error is InvalidOperationException)
-                {
-                    throw error;
-                }
-                throw new IOException(error.Message, error);
+                ThrowOnConnectionError();
             }
         }
 
@@ -339,6 +348,16 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Internal.Http
 
                 returnBlock.Pool.Return(returnBlock);
             }
+        }
+
+        private void ThrowOnConnectionError()
+        {
+            var error = _awaitableError;
+            if (error is TaskCanceledException || error is InvalidOperationException)
+            {
+                throw error;
+            }
+            throw new IOException(error.Message, error);
         }
     }
 }
